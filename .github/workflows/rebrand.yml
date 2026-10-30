@@ -78,7 +78,7 @@ jobs:
 
       - name: Reportar link ao Painel
         env:
-          API_URL: https://poupalauncher.alwaysdata.net/poupalauncher/api.php
+          API_URL: https://poupalauncher.alwaysdata.net/api.php
           REBRAND_TOKEN: ${{ secrets.REBRAND_TOKEN }}
           RESELLER_ID: ${{ github.event.client_payload.reseller_id || 'ADMIN' }}
           GITHUB_USER: panthervpn
