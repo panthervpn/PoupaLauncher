@@ -1,81 +1,136 @@
-name: Build Launcher APK
+name: Rebrand APK
 
 on:
   repository_dispatch:
     types: [build_apk]
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Nome do App'
+        required: true
+      reseller_id:
+        description: 'ID do Revendedor'
+        required: true
 
 jobs:
-  build-and-release:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v3
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Process Images (Base64 to PNG)
+      - name: Instalar dependencias
         run: |
-          mkdir -p app/src/main/res/drawable
-          mkdir -p app/src/main/assets
+          sudo apt-get update
+          sudo apt-get install -y zipalign apksigner imagemagick jq
+
+      - name: Instalar apktool 2.9.3
+        run: |
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+          chmod +x apktool
+          sudo mv apktool /usr/local/bin/apktool
+          sudo mv apktool_2.9.3.jar /usr/local/bin/apktool.jar
+
+      - name: Extrair base.apk
+        run: apktool d -s base.apk -o app_extraido
+
+      - name: Baixar assets, renomear app, trocar logo e injetar rid
+        env:
+          PANEL_URL: ${{ github.event.client_payload.panel_url }}
+          REBRAND_TOKEN: "17out1986"
+          RESELLER_ID: ${{ github.event.client_payload.reseller_id || github.event.inputs.reseller_id }}
+          APP_NAME_INPUT: ${{ github.event.client_payload.app_name || github.event.inputs.app_name }}
+        run: |
+          set -e
           
-          # Converte a logo base64 para o arquivo .png e substitui no Android
-          python -c "import base64; open('app/src/main/res/drawable/logo.png', 'wb').write(base64.b64decode('${{ github.event.client_payload.logo_b64 }}'))"
-          
-          # Se o wallpaper foi enviado, converte também
-          if [ -n "${{ github.event.client_payload.wallpaper_b64 }}" ]; then
-            python -c "import base64; open('app/src/main/res/drawable/wallpaper.png', 'wb').write(base64.b64decode('${{ github.event.client_payload.wallpaper_b64 }}'))"
+          # Se rodado manualmente sem o painel, defina a URL aqui como fallback
+          if [ -z "$PANEL_URL" ]; then
+            PANEL_URL="https://panthervpn.alwaysdata.net/api.php"
           fi
 
-      - name: Set App Name
+          ASSETS=$(curl -s -H "X-Auth-Token: $REBRAND_TOKEN" "$PANEL_URL?action=get_rebrand_assets&reseller_id=$RESELLER_ID")
+          APP_NAME_REMOTE=$(echo "$ASSETS" | jq -r '.app_name // empty')
+          LOGO_B64=$(echo "$ASSETS" | jq -r '.logo_b64 // empty')
+          WALLPAPER_B64=$(echo "$ASSETS" | jq -r '.wallpaper_b64 // empty')
+          
+          APP_NAME="${APP_NAME_REMOTE:-$APP_NAME_INPUT}"
+          echo "DEBUG nome_remoto='${APP_NAME}' tamanho_logo=${#LOGO_B64} tamanho_wallpaper=${#WALLPAPER_B64}"
+          
+          sed -i "s|<string name=\"app_name\">[^<]*</string>|<string name=\"app_name\">${APP_NAME}</string>|" app_extraido/res/values/strings.xml
+          mkdir -p app_extraido/assets/assets
+          echo -n "$RESELLER_ID" > app_extraido/assets/assets/rid.txt
+          echo -n "$RESELLER_ID" > app_extraido/assets/rid.txt
+          
+          if [ -n "$LOGO_B64" ]; then
+            echo "$LOGO_B64" | base64 -d > raw_logo
+            convert raw_logo -resize 150x150 -background none -gravity center -extent 192x192 PNG32:nova_logo.png
+            convert raw_logo -resize 150x150 -background none -gravity center -extent 192x192 webp:nova_logo.webp 2>/dev/null || cp nova_logo.png nova_logo.webp
+            find app_extraido/res -name "ic_launcher*.png" -exec cp nova_logo.png {} \;
+            find app_extraido/res -name "ic_launcher*.webp" -exec cp nova_logo.webp {} \;
+            echo "DEBUG arquivos de icone substituidos:"
+            find app_extraido/res \( -name "ic_launcher*.png" -o -name "ic_launcher*.webp" \) | head -60
+          else
+            echo "DEBUG: LOGO_B64 VAZIO - assets nao encontrados no Painel"
+          fi
+          
+          if [ -n "$WALLPAPER_B64" ]; then
+            echo "$WALLPAPER_B64" | base64 -d > wallpaper_custom
+            convert wallpaper_custom -resize 1200x896^ -gravity center -extent 1200x896 -quality 90 JPG:app_extraido/res/drawable/wallpaper_blue.jpg
+            echo "DEBUG: wallpaper_blue.jpg substituido"
+          fi
+
+      - name: Compilar, alinhar e assinar
         run: |
-          # Substitui o nome do aplicativo no arquivo strings.xml
-          sed -i 's/<string name="app_name">.*<\/string>/<string name="app_name">${{ github.event.client_payload.app_name }}<\/string>/g' app/src/main/res/values/strings.xml || true
+          set -e
+          apktool b app_extraido -o app_unaligned.apk
+          zipalign -f 4 app_unaligned.apk app_aligned.apk
+          apksigner sign --ks release.jks --ks-pass pass:123456 --out app_final.apk app_aligned.apk
 
-      - name: Set Reseller ID
-        run: |
-          # Cria o arquivo rid.txt para vincular o painel do revendedor
-          echo "${{ github.event.client_payload.reseller_id }}" > app/src/main/assets/rid.txt
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Build Release APK
-        run: ./gradlew assembleRelease
-
-      - name: Rename APK for consistent URL
-        run: |
-          # Renomeia o APK gerado para garantir que a URL final seja exata e padronizada
-          mv app/build/outputs/apk/release/*.apk app/build/outputs/apk/release/CustomApp.apk
-
-      - name: Upload Release to GitHub
-        id: create_release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: "v${{ github.run_id }}"
-          name: "APK - ${{ github.event.client_payload.app_name }}"
-          files: app/build/outputs/apk/release/CustomApp.apk
+      - name: Publicar no GitHub Releases
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Notify Panel (Success)
-        if: success()
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_USER: panthervpn
+          GITHUB_REPO: PoupaLauncher
+          RESELLER_ID: ${{ github.event.client_payload.reseller_id || github.event.inputs.reseller_id }}
+          APP_NAME_INPUT: ${{ github.event.client_payload.app_name || github.event.inputs.app_name }}
         run: |
-          # Gera a URL de download e envia de volta para o painel via API
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${{ github.run_id }}/CustomApp.apk"
-          
-          curl -X POST "${{ github.event.client_payload.panel_url }}?action=set_rebrand_link&reseller_id=${{ github.event.client_payload.reseller_id }}" -H "Content-Type: application/json" -d "{\"link\":\"$DOWNLOAD_URL\"}"
-          
-          curl -X POST "${{ github.event.client_payload.panel_url }}?action=set_rebrand_status&reseller_id=${{ github.event.client_payload.reseller_id }}" -H "Content-Type: application/json" -d "{\"status\":\"done\"}"
+          set -e
+          SAFE_NAME=$(echo "$APP_NAME_INPUT" | sed 's/[^A-Za-z0-9._-]\+/_/g')
+          if [ -z "$SAFE_NAME" ]; then SAFE_NAME="app"; fi
+          FINAL_APK="${SAFE_NAME}.apk"
+          cp app_final.apk "$FINAL_APK"
+          TAG="rebrand-$RESELLER_ID"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "APK rebrand $RESELLER_ID"
+          gh release upload "$TAG" "$FINAL_APK" --clobber
 
-      - name: Notify Panel (Failure)
-        if: failure()
+      - name: Reportar link ao Painel
+        if: always()
+        env:
+          PANEL_URL: ${{ github.event.client_payload.panel_url }}
+          REBRAND_TOKEN: "17out1986"
+          RESELLER_ID: ${{ github.event.client_payload.reseller_id || github.event.inputs.reseller_id || 'ADMIN' }}
+          GITHUB_USER: panthervpn
+          GITHUB_REPO: PoupaLauncher
+          APP_NAME_INPUT: ${{ github.event.client_payload.app_name || github.event.inputs.app_name }}
         run: |
-          # Se der erro no build, avisa o painel para liberar o botão e mostrar a falha
-          curl -X POST "${{ github.event.client_payload.panel_url }}?action=set_rebrand_status&reseller_id=${{ github.event.client_payload.reseller_id }}" -H "Content-Type: application/json" -d "{\"status\":\"error\"}"
+          if [ -z "$PANEL_URL" ]; then
+            PANEL_URL="https://panthervpn.alwaysdata.net/api.php"
+          fi
+
+          if [ "${{ job.status }}" == "success" ]; then
+            SAFE_NAME=$(echo "$APP_NAME_INPUT" | sed 's/[^A-Za-z0-9._-]\+/_/g')
+            if [ -z "$SAFE_NAME" ]; then SAFE_NAME="app"; fi
+            LINK="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/download/rebrand-${RESELLER_ID}/${SAFE_NAME}.apk"
+            curl -s -X POST -H "X-Auth-Token: $REBRAND_TOKEN" -H "Content-Type: application/json" \
+              -d "{\"reseller_id\":\"${RESELLER_ID}\",\"link\":\"${LINK}\"}" \
+              "$PANEL_URL?action=set_rebrand_link&reseller_id=$RESELLER_ID"
+            curl -s -X POST -H "X-Auth-Token: $REBRAND_TOKEN" -H "Content-Type: application/json" \
+              -d "{\"reseller_id\":\"${RESELLER_ID}\",\"status\":\"done\"}" \
+              "$PANEL_URL?action=set_rebrand_status&reseller_id=$RESELLER_ID"
+          else
+            curl -s -X POST -H "X-Auth-Token: $REBRAND_TOKEN" -H "Content-Type: application/json" \
+              -d "{\"reseller_id\":\"${RESELLER_ID}\",\"status\":\"error\"}" \
+              "$PANEL_URL?action=set_rebrand_status&reseller_id=$RESELLER_ID"
+          fi
