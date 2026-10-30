@@ -1,0 +1,116 @@
+name: Rebrand APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Nome do App'
+        required: true
+      reseller_id:
+        description: 'ID do Revendedor'
+        required: true
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zipalign apksigner imagemagick
+
+      - name: Instalar apktool 2.9.3
+        run: |
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
+          chmod +x apktool
+          sudo mv apktool /usr/local/bin/apktool
+          sudo mv apktool_2.9.3.jar /usr/local/bin/apktool.jar
+
+      - name: Extrair base.apk
+        run: apktool d -s base.apk -o app_extraido
+
+      - name: Baixar assets, renomear app, trocar logo e injetar rid
+        env:
+          WORKER_URL: https://worker-codigo.blindervpn.workers.dev
+          REBRAND_TOKEN: ${{ secrets.REBRAND_TOKEN }}
+          RESELLER_ID: ${{ github.event.inputs.reseller_id }}
+          APP_NAME: ${{ github.event.inputs.app_name }}
+        run: |
+          set -e
+          ASSETS=$(curl -s -H "X-Auth-Token: $REBRAND_TOKEN" "$WORKER_URL/?action=get_rebrand_assets&reseller_id=$RESELLER_ID")
+          APP_NAME_REMOTE=$(echo "$ASSETS" | jq -r '.app_name // empty')
+          LOGO_B64=$(echo "$ASSETS" | jq -r '.logo_b64 // empty')
+          WALLPAPER_B64=$(echo "$ASSETS" | jq -r '.wallpaper_b64 // empty')
+          echo "DEBUG nome_remoto='${APP_NAME_REMOTE}' tamanho_logo=${#LOGO_B64} tamanho_wallpaper=${#WALLPAPER_B64}"
+          if [ -n "$APP_NAME_REMOTE" ]; then APP_NAME="$APP_NAME_REMOTE"; fi
+          sed -i "s|<string name=\"app_name\">[^<]*</string>|<string name=\"app_name\">${APP_NAME}</string>|" app_extraido/res/values/strings.xml
+          mkdir -p app_extraido/assets/assets
+          echo -n "$RESELLER_ID" > app_extraido/assets/assets/rid.txt
+          echo -n "$RESELLER_ID" > app_extraido/assets/rid.txt
+          if [ -n "$LOGO_B64" ]; then
+            echo "$LOGO_B64" | base64 -d > raw_logo
+            convert raw_logo -resize 150x150 -background none -gravity center -extent 192x192 PNG32:nova_logo.png
+            convert raw_logo -resize 150x150 -background none -gravity center -extent 192x192 webp:nova_logo.webp 2>/dev/null || cp nova_logo.png nova_logo.webp
+            find app_extraido/res -name "ic_launcher*.png" -exec cp nova_logo.png {} \;
+            find app_extraido/res -name "ic_launcher*.webp" -exec cp nova_logo.webp {} \;
+            echo "DEBUG arquivos de icone substituidos:"
+            find app_extraido/res \( -name "ic_launcher*.png" -o -name "ic_launcher*.webp" \) | head -60
+          else
+            echo "DEBUG: LOGO_B64 VAZIO - assets nao encontrados no Worker"
+          fi
+          if [ -n "$WALLPAPER_B64" ]; then
+            echo "$WALLPAPER_B64" | base64 -d > wallpaper_custom
+            convert wallpaper_custom -resize 1200x896^ -gravity center -extent 1200x896 -quality 90 JPG:app_extraido/res/drawable/wallpaper_blue.jpg
+            echo "DEBUG: wallpaper_blue.jpg substituido"
+          fi
+
+      - name: Compilar, alinhar e assinar
+        run: |
+          set -e
+          apktool b app_extraido -o app_unaligned.apk
+          zipalign -f 4 app_unaligned.apk app_aligned.apk
+          apksigner sign --ks release.jks --ks-pass pass:123456 --out app_final.apk app_aligned.apk
+
+      - name: Publicar no GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_USER: dinhovikking17
+          GITHUB_REPO: Poupalauncher
+          RESELLER_ID: ${{ github.event.inputs.reseller_id }}
+          APP_NAME: ${{ github.event.inputs.app_name }}
+        run: |
+          set -e
+          SAFE_NAME=$(echo "$APP_NAME" | sed 's/[^A-Za-z0-9._-]\+/_/g')
+          if [ -z "$SAFE_NAME" ]; then SAFE_NAME="app"; fi
+          FINAL_APK="${SAFE_NAME}.apk"
+          cp app_final.apk "$FINAL_APK"
+          TAG="rebrand-$RESELLER_ID"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "APK rebrand $RESELLER_ID"
+          gh release upload "$TAG" "$FINAL_APK" --clobber
+
+      - name: Reportar link ao Worker
+        env:
+          WORKER_URL: https://worker-codigo.blindervpn.workers.dev
+          REBRAND_TOKEN: ${{ secrets.REBRAND_TOKEN }}
+          RESELLER_ID: ${{ github.event.inputs.reseller_id || 'ADMIN' }}
+          GITHUB_USER: dinhovikking17
+          GITHUB_REPO: Poupalauncher
+          APP_NAME: ${{ github.event.inputs.app_name }}
+        run: |
+          SAFE_NAME=$(echo "$APP_NAME" | sed 's/[^A-Za-z0-9._-]\+/_/g')
+          if [ -z "$SAFE_NAME" ]; then SAFE_NAME="app"; fi
+          LINK="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/download/rebrand-${RESELLER_ID}/${SAFE_NAME}.apk"
+          curl -s -X POST -H "X-Auth-Token: $REBRAND_TOKEN" -H "Content-Type: application/json" \
+            -d "{\"reseller_id\":\"${RESELLER_ID}\",\"link\":\"${LINK}\"}" \
+            "$WORKER_URL/?action=set_rebrand_link&reseller_id=$RESELLER_ID"
+          curl -s -X POST -H "X-Auth-Token: $REBRAND_TOKEN" -H "Content-Type: application/json" \
+            -d "{\"reseller_id\":\"${RESELLER_ID}\",\"status\":\"done\"}" \
+            "$WORKER_URL/?action=set_rebrand_status&reseller_id=$RESELLER_ID"
+
+
