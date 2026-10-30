@@ -32,23 +32,23 @@ jobs:
         env:
           RESELLER_ID: ${{ github.event.client_payload.reseller_id }}
           APP_NAME: ${{ github.event.client_payload.app_name }}
-          LOGO_B64: ${{ github.event.client_payload.logo_b64 }}
-          WALLPAPER_B64: ${{ github.event.client_payload.wallpaper_b64 }}
+          LOGO_URL: ${{ github.event.client_payload.logo_url }}
+          WALLPAPER_URL: ${{ github.event.client_payload.wallpaper_url }}
         run: |
           set -e
           sed -i "s|<string name=\"app_name\">[^<]*</string>|<string name=\"app_name\">${APP_NAME}</string>|" app_extraido/res/values/strings.xml
           mkdir -p app_extraido/assets/assets
           echo -n "$RESELLER_ID" > app_extraido/assets/assets/rid.txt
           echo -n "$RESELLER_ID" > app_extraido/assets/rid.txt
-          if [ -n "$LOGO_B64" ]; then
-            echo "$LOGO_B64" | base64 -d > raw_logo
+          if [ -n "$LOGO_URL" ]; then
+            wget -q -O raw_logo "$LOGO_URL"
             convert raw_logo -resize 150x150 -background none -gravity center -extent 192x192 PNG32:nova_logo.png
             convert raw_logo -resize 150x150 -background none -gravity center -extent 192x192 webp:nova_logo.webp 2>/dev/null || cp nova_logo.png nova_logo.webp
             find app_extraido/res -name "ic_launcher*.png" -exec cp nova_logo.png {} \;
             find app_extraido/res -name "ic_launcher*.webp" -exec cp nova_logo.webp {} \;
           fi
-          if [ -n "$WALLPAPER_B64" ]; then
-            echo "$WALLPAPER_B64" | base64 -d > wallpaper_custom
+          if [ -n "$WALLPAPER_URL" ]; then
+            wget -q -O wallpaper_custom "$WALLPAPER_URL"
             convert wallpaper_custom -resize 1200x896^ -gravity center -extent 1200x896 -quality 90 JPG:app_extraido/res/drawable/wallpaper_blue.jpg
           fi
 
