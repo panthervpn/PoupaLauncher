@@ -1,98 +1,972 @@
-name: Rebrand APK
+<?php
+// Arquivo: api.php
 
-on:
-  repository_dispatch:
-    types: [build_apk]
+require 'database.php'; // Instancia o $pdo
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
+header('Content-Type: application/json');
 
-      - name: Instalar dependencias
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zipalign apksigner imagemagick
+$action = $_GET['action'] ?? '';
+$ADM_EMAIL = "panthervpn@gmail.com";
 
-      - name: Instalar apktool 2.9.3
-        run: |
-          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
-          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar
-          chmod +x apktool
-          sudo mv apktool /usr/local/bin/apktool
-          sudo mv apktool_2.9.3.jar /usr/local/bin/apktool.jar
+// Lê o JSON do corpo (para requisições POST)
+$body = json_decode(file_get_contents('php://input'), true) ?? [];
 
-      - name: Extrair base.apk
-        run: apktool d -s base.apk -o app_extraido
+// Helper para resposta JSON
+function json_response($data, $status = 200) {
+    http_response_code($status);
+    echo json_encode($data);
+    exit;
+}
 
-      - name: Injetar Nome, Logo e Wallpaper
-        env:
-          RESELLER_ID: ${{ github.event.client_payload.reseller_id }}
-          APP_NAME: ${{ github.event.client_payload.app_name }}
-          LOGO_B64: ${{ github.event.client_payload.logo_b64 }}
-          WALLPAPER_B64: ${{ github.event.client_payload.wallpaper_b64 }}
-        run: |
-          set -e
-          sed -i "s|<string name=\"app_name\">[^<]*</string>|<string name=\"app_name\">${APP_NAME}</string>|" app_extraido/res/values/strings.xml
-          mkdir -p app_extraido/assets/assets
-          echo -n "$RESELLER_ID" > app_extraido/assets/assets/rid.txt
-          echo -n "$RESELLER_ID" > app_extraido/assets/rid.txt
-          if [ -n "$LOGO_B64" ]; then
-            echo "$LOGO_B64" | base64 -d > raw_logo
-            convert raw_logo -resize 150x150 -background none -gravity center -extent 192x192 PNG32:nova_logo.png
-            convert raw_logo -resize 150x150 -background none -gravity center -extent 192x192 webp:nova_logo.webp 2>/dev/null || cp nova_logo.png nova_logo.webp
-            find app_extraido/res -name "ic_launcher*.png" -exec cp nova_logo.png {} \;
-            find app_extraido/res -name "ic_launcher*.webp" -exec cp nova_logo.webp {} \;
-          fi
-          if [ -n "$WALLPAPER_B64" ]; then
-            echo "$WALLPAPER_B64" | base64 -d > wallpaper_custom
-            convert wallpaper_custom -resize 1200x896^ -gravity center -extent 1200x896 -quality 90 JPG:app_extraido/res/drawable/wallpaper_blue.jpg
-          fi
+// ==== HELPERS DO BANCO DE DADOS ====
 
-      - name: Compilar, alinhar e assinar
-        run: |
-          set -e
-          apktool b app_extraido -o app_unaligned.apk
-          zipalign -f 4 app_unaligned.apk app_aligned.apk
-          apksigner sign --ks release.jks --ks-pass pass:123456 --out app_final.apk app_aligned.apk
+function get_kv($pdo, $key) {
+    $stmt = $pdo->prepare("SELECT value FROM kv WHERE key = ?");
+    $stmt->execute([$key]);
+    return $stmt->fetchColumn() ?: null;
+}
 
-      - name: Publicar no GitHub Releases
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_USER: panthervpn
-          GITHUB_REPO: PoupaLauncher
-          RESELLER_ID: ${{ github.event.client_payload.reseller_id }}
-          APP_NAME: ${{ github.event.client_payload.app_name }}
-        run: |
-          set -e
-          SAFE_NAME=$(echo "$APP_NAME" | sed 's/[^A-Za-z0-9._-]\+/_/g')
-          if [ -z "$SAFE_NAME" ]; then SAFE_NAME="app"; fi
-          FINAL_APK="${SAFE_NAME}.apk"
-          cp app_final.apk "$FINAL_APK"
-          TAG="rebrand-$RESELLER_ID"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "APK rebrand $RESELLER_ID"
-          gh release upload "$TAG" "$FINAL_APK" --clobber
+function put_kv($pdo, $key, $value) {
+    $stmt = $pdo->prepare("INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+    $stmt->execute([$key, $value]);
+}
 
-      - name: Reportar link ao Painel
-        env:
-          API_URL: https://poupalauncher.alwaysdata.net/api.php
-          REBRAND_TOKEN: ${{ secrets.REBRAND_TOKEN }}
-          RESELLER_ID: ${{ github.event.client_payload.reseller_id || 'ADMIN' }}
-          GITHUB_USER: panthervpn
-          GITHUB_REPO: PoupaLauncher
-          APP_NAME: ${{ github.event.client_payload.app_name }}
-        run: |
-          SAFE_NAME=$(echo "$APP_NAME" | sed 's/[^A-Za-z0-9._-]\+/_/g')
-          if [ -z "$SAFE_NAME" ]; then SAFE_NAME="app"; fi
-          LINK="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/download/rebrand-${RESELLER_ID}/${SAFE_NAME}.apk"
-          
-          curl -s -X POST -H "X-Auth-Token: $REBRAND_TOKEN" -H "Content-Type: application/json" \
-            -d "{\"reseller_id\":\"${RESELLER_ID}\",\"link\":\"${LINK}\"}" \
-            "$API_URL?action=set_rebrand_link&reseller_id=$RESELLER_ID"
+function get_all_resellers($pdo) {
+    $stmt = $pdo->query("SELECT username, data_json FROM resellers");
+    $resellers = [];
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $resellers[$row['username']] = json_decode($row['data_json'], true);
+    }
+    // Garante que o admin exista
+    if (!isset($resellers['admin'])) {
+        $resellers['admin'] = ['role' => 'admin', 'credits' => 9999999, 'parent' => null, 'app_id' => 'ADMIN'];
+        save_reseller($pdo, 'admin', $resellers['admin']);
+    }
+    return $resellers;
+}
+
+function save_reseller($pdo, $username, $data) {
+    $stmt = $pdo->prepare("INSERT INTO resellers (username, data_json) VALUES (?, ?) ON CONFLICT(username) DO UPDATE SET data_json = excluded.data_json");
+    $stmt->execute([$username, json_encode($data)]);
+}
+
+function save_all_resellers($pdo, $resellers) {
+    foreach ($resellers as $user => $data) {
+        save_reseller($pdo, $user, $data);
+    }
+}
+
+function find_reseller_by_email($resellers, $email) {
+    $e = strtolower(trim($email ?? ''));
+    foreach ($resellers as $k => $data) {
+        if (strtolower($data['google_email'] ?? '') === $e) return $k;
+    }
+    return null;
+}
+
+function is_reseller_or_parent_expired($pdo, $username, $resellers) {
+    if (!$username || $username === 'admin') return false;
+    $current = $username;
+    $guard = 0;
+    while ($current && $current !== 'admin' && $guard < 100) {
+        $guard++;
+        $data = $resellers[$current] ?? null;
+        if (!$data) return true;
+        if (!empty($data['blocked'])) return true;
+        if (!empty($data['expires_at']) && (time() * 1000) > $data['expires_at']) return true;
+        $current = $data['parent'] ?? null;
+    }
+    return false;
+}
+
+// Retorna autenticação (Simula o checkAuth do Worker)
+function check_auth($pdo) {
+    $email = strtolower(trim($_SERVER['HTTP_X_GOOGLE_EMAIL'] ?? ''));
+    if (!$email) return null;
+    $resellers = get_all_resellers($pdo);
+    $user = find_reseller_by_email($resellers, $email);
+    if (!$user) return null;
+    return [
+        'user' => $user,
+        'role' => $resellers[$user]['role'] ?? 'reseller',
+        'data' => $resellers[$user],
+        'resellers' => $resellers
+    ];
+}
+
+// ==========================================
+// ============ ENDPOINTS ===================
+// ==========================================
+
+// 1. LOGIN COM GOOGLE (Exatamente igual a lógica do Cloudflare)
+if ($action === 'google_auth') {
+    $email = trim($_GET['email'] ?? '');
+    $sub = trim($_GET['sub'] ?? '');
+    $name = $_GET['name'] ?? '';
+    $picture = $_GET['picture'] ?? '';
+    $inviteToken = $_GET['invite'] ?? '';
+    $deviceId = trim($_GET['deviceId'] ?? '');
+    $appIdLink = strtoupper(trim($_GET['appid'] ?? ''));
+
+    if (!$email || !$sub) json_response(['success' => false, 'error' => 'Dados invalidos do Google'], 400);
+
+    $resellers = get_all_resellers($pdo);
+
+    // Se é o admin master
+    if (strtolower($email) === strtolower($ADM_EMAIL)) {
+        $resellers['admin']['google_email'] = $email;
+        $resellers['admin']['google_sub'] = $sub;
+        $resellers['admin']['google_name'] = $name ?: 'Administrador';
+        $resellers['admin']['google_picture'] = $picture;
+        save_reseller($pdo, 'admin', $resellers['admin']);
+
+        json_response([
+            'success' => true, 'user' => 'admin', 'role' => 'admin', 'credits' => 9999999, 'parent' => null,
+            'app_id' => 'ADMIN', 'expires_at' => null, 'display_name' => $name ?: 'Administrador', 'photo' => $picture,
+            'dashboard_banner' => $resellers['admin']['dashboard_banner'] ?? '',
+            'dashboard_background' => $resellers['admin']['dashboard_background'] ?? ''
+        ]);
+    }
+
+    // Já existe a conta?
+    $existing = find_reseller_by_email($resellers, $email);
+    if ($existing) {
+        $resellers[$existing]['google_sub'] = $sub;
+        if ($name) $resellers[$existing]['google_name'] = $name;
+        if ($picture) $resellers[$existing]['google_picture'] = $picture;
+        save_reseller($pdo, $existing, $resellers[$existing]);
+
+        $exp = $resellers[$existing]['expires_at'] ?? null;
+        if (is_reseller_or_parent_expired($pdo, $existing, $resellers)) $exp = 1;
+
+        json_response([
+            'success' => true, 'user' => $existing, 'role' => $resellers[$existing]['role'] ?? 'reseller',
+            'credits' => $resellers[$existing]['credits'], 'parent' => $resellers[$existing]['parent'],
+            'app_id' => $resellers[$existing]['app_id'] ?? 'ADMIN', 'expires_at' => $exp,
+            'display_name' => $resellers[$existing]['google_name'] ?? $existing,
+            'photo' => $resellers[$existing]['google_picture'] ?? '',
+            'dashboard_banner' => $resellers[$existing]['dashboard_banner'] ?? '',
+            'dashboard_background' => $resellers[$existing]['dashboard_background'] ?? ''
+        ]);
+    }
+
+    // Processamento de Convite
+    if ($inviteToken) {
+        $invStr = get_kv($pdo, "invite_$inviteToken");
+        $inv = $invStr ? json_decode($invStr, true) : null;
+        if ($inv && empty($inv['used']) && isset($resellers[$inv['creator']])) {
+            $finalUser = $inv['username'];
+            $gName = $name ?: $finalUser;
             
-          curl -s -X POST -H "X-Auth-Token: $REBRAND_TOKEN" -H "Content-Type: application/json" \
-            -d "{\"reseller_id\":\"${RESELLER_ID}\",\"status\":\"done\"}" \
-            "$API_URL?action=set_rebrand_status&reseller_id=$RESELLER_ID"
+            $resellers[$finalUser]['password'] = substr($sub, 0, 8);
+            $resellers[$finalUser]['google_email'] = $email;
+            $resellers[$finalUser]['google_sub'] = $sub;
+            $resellers[$finalUser]['google_name'] = $gName;
+            $resellers[$finalUser]['google_picture'] = $picture;
+            unset($resellers[$finalUser]['pending_invite']);
+            
+            $inv['used'] = true;
+            $inv['used_by'] = $email;
+            put_kv($pdo, "invite_$inviteToken", json_encode($inv));
+            save_all_resellers($pdo, $resellers);
+
+            $expInvite = $resellers[$finalUser]['expires_at'] ?? null;
+            if (is_reseller_or_parent_expired($pdo, $finalUser, $resellers)) $expInvite = 1;
+
+            json_response([
+                'success' => true, 'user' => $finalUser, 'role' => 'reseller',
+                'credits' => $resellers[$finalUser]['credits'], 'parent' => $resellers[$finalUser]['parent'],
+                'app_id' => $resellers[$finalUser]['app_id'], 'expires_at' => $expInvite,
+                'display_name' => $gName, 'photo' => $picture
+            ]);
+        }
+    }
+
+    // Auto-teste (Login sem convite se o Admin ativou)
+    $autoRaw = get_kv($pdo, 'autotest_config');
+    $autoCfg = $autoRaw ? json_decode($autoRaw, true) : null;
+    $testMinutes = ($autoCfg && ($autoCfg['minutes'] ?? 0) > 0 && ($autoCfg['until'] ?? 0) > (time() * 1000)) ? $autoCfg['minutes'] : 0;
+    
+    if ($testMinutes > 0) {
+        $base = preg_replace('/[^a-z0-9]/i', '', strtolower(explode('@', $email)[0]));
+        $newUser = $base ?: 'user';
+        $n = 1;
+        while (isset($resellers[$newUser])) { $newUser = $base . $n; $n++; }
+        
+        $resellers[$newUser] = [
+            'password' => substr($sub, 0, 8), 'role' => 'reseller', 'test_account' => true,
+            'credits' => 9999999, 'parent' => 'admin', 'app_id' => strtoupper(substr(md5(uniqid()), 0, 8)),
+            'created_at' => time() * 1000, 'expires_at' => (time() * 1000) + ($testMinutes * 60000),
+            'google_email' => $email, 'google_sub' => $sub, 'google_name' => $name ?: $newUser, 'google_picture' => $picture,
+        ];
+        save_all_resellers($pdo, $resellers);
+        json_response([
+            'success' => true, 'user' => $newUser, 'role' => 'reseller', 'credits' => 9999999,
+            'parent' => 'admin', 'app_id' => $resellers[$newUser]['app_id'], 'expires_at' => $resellers[$newUser]['expires_at'],
+            'display_name' => $name ?: $newUser, 'photo' => $picture
+        ]);
+    }
+
+    json_response(['success' => false, 'error' => 'Conta não vinculada. Peça seu link de revendedor e tente novamente.'], 401);
+}
+
+// ==========================================
+// ============ ROTAS PÚBLICAS ==============
+// ==========================================
+
+// 1. VALIDAÇÃO DO APP NA TV
+if ($action === 'validate') {
+    $code = trim($_GET['code'] ?? '');
+    $deviceId = trim($_GET['deviceId'] ?? '');
+    $appIdValidate = strtoupper(trim($_GET['appid'] ?? 'ADMIN'));
+    
+    $valid = false; $limitReached = false; $exp = 0; $act = 0; $blocked = false;
+
+    if ($code) {
+        $stmt = $pdo->prepare("SELECT code, exp, act, blocked, screenLimit, creator FROM codes WHERE code = ?");
+        $stmt->execute([$code]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$row) {
+            $resellersTest = get_all_resellers($pdo);
+            $testUntil = 0;
+            foreach ($resellersTest as $rk => $rData) {
+                if (($rData['app_id'] ?? '') !== $appIdValidate) continue;
+                $tm = $rData['test_mode'] ?? null;
+                if ($tm && isset($tm['until']) && $tm['until'] > (time() * 1000) && $tm['until'] > $testUntil) {
+                    $testUntil = $tm['until'];
+                }
+            }
+            if ($testUntil > 0) { http_response_code(200); echo "VALID:$testUntil:0"; exit; }
+        } else {
+            $creator = $row['creator'] ?: 'admin';
+            if ($creator !== 'admin') {
+                $resellers = get_all_resellers($pdo);
+                if (is_reseller_or_parent_expired($pdo, $creator, $resellers)) {
+                    http_response_code(200); echo "BLOCKED"; exit;
+                }
+            }
+            $exp = (int)$row['exp'];
+            $act = (int)$row['act'];
+            $blocked = (bool)$row['blocked'];
+            $screenLimit = max(1, (int)$row['screenLimit']);
+            $nowMs = time() * 1000;
+
+            if (!$blocked && ($exp === 0 || $exp > $nowMs)) {
+                if (!$deviceId) {
+                    $valid = true;
+                    if (!$act) { $act = $nowMs; $pdo->prepare("UPDATE codes SET act = ? WHERE code = ?")->execute([$act, $code]); }
+                } else {
+                    $pdo->prepare("DELETE FROM sessions WHERE last_seen < ?")->execute([$nowMs - (30 * 24 * 3600 * 1000)]);
+                    $sStmt = $pdo->prepare("SELECT device_id, last_seen FROM sessions WHERE code = ?");
+                    $sStmt->execute([$code]);
+                    $sessions = [];
+                    while ($sRow = $sStmt->fetch(PDO::FETCH_ASSOC)) { $sessions[$sRow['device_id']] = $sRow['last_seen']; }
+
+                    $dirty = false;
+                    if (isset($sessions[$deviceId])) {
+                        if (($nowMs - $sessions[$deviceId]) > (24 * 3600 * 1000)) { $sessions[$deviceId] = $nowMs; $dirty = true; }
+                        $valid = true;
+                    } else {
+                        if (count($sessions) < $screenLimit) { $sessions[$deviceId] = $nowMs; $valid = true; $dirty = true; } 
+                        else { $limitReached = true; }
+                    }
+                    if ($dirty) $pdo->prepare("INSERT INTO sessions (code, device_id, last_seen) VALUES (?, ?, ?) ON CONFLICT(code, device_id) DO UPDATE SET last_seen = excluded.last_seen")->execute([$code, $deviceId, $nowMs]);
+                    if (!$act) { $act = $nowMs; $pdo->prepare("UPDATE codes SET act = ? WHERE code = ?")->execute([$act, $code]); }
+                }
+            }
+        }
+    }
+    if ($blocked) { http_response_code(200); echo "BLOCKED"; exit; }
+    if ($limitReached) { http_response_code(403); echo "Limite de telas atingido"; exit; }
+    http_response_code(200); echo $valid ? "VALID:$exp:$act" : "INVALID"; exit;
+}
+
+// 2. STATUS MODO TESTE (APP)
+if ($action === 'testmode_status') {
+    $appIdStatus = trim($_GET['appid'] ?? 'ADMIN');
+    $resellers = get_all_resellers($pdo);
+    $testOn = false; $testMinutes = 0; $testUntil = 0; $nowTm = time() * 1000;
+    foreach ($resellers as $rk => $rData) {
+        if (($rData['app_id'] ?? '') !== $appIdStatus) continue;
+        $tm = $rData['test_mode'] ?? null;
+        if ($tm && isset($tm['until']) && $tm['until'] > $nowTm && $tm['until'] > $testUntil) {
+            $testOn = true; $testMinutes = $tm['minutes'] ?? 0; $testUntil = $tm['until'];
+        }
+    }
+    http_response_code(200); echo $testOn ? "TESTON:$testMinutes" : "TESTOFF"; exit;
+}
+
+// 3. ATUALIZAÇÕES DO APK
+if ($action === 'set_apk_update' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $token = $_SERVER['HTTP_X_AUTH_TOKEN'] ?? '';
+    if ($token !== '17out1986') json_response(['error' => 'Nao autorizado'], 403);
+    $appId = strtoupper(trim($body['app_id'] ?? 'ADMIN')) ?: 'ADMIN';
+    $version = trim($body['version'] ?? ''); $link = trim($body['link'] ?? ''); $notes = trim($body['notes'] ?? '');
+    if (!$version || !$link) json_response(['error' => 'Obrigatório'], 400);
+    put_kv($pdo, "apkupdate_$appId", json_encode(['version' => $version, 'link' => $link, 'notes' => $notes, 'at' => time() * 1000]));
+    json_response(['success' => true]);
+}
+if ($action === 'get_apk_update') {
+    $appIdUp = strtoupper(trim($_GET['appid'] ?? 'ADMIN')) ?: 'ADMIN';
+    $rawUp = get_kv($pdo, "apkupdate_$appIdUp");
+    if (!$rawUp) { http_response_code(200); echo "NOUPDATE"; exit; }
+    $upd = json_decode($rawUp, true) ?? [];
+    $notesClean = str_replace(["|", "\r", "\n"], " ", $upd['notes'] ?? '');
+    http_response_code(200); echo "UPDATE:" . ($upd['version'] ?? '') . "|" . ($upd['link'] ?? '') . "|" . $notesClean; exit;
+}
+
+// ==== TODAS AS ROTAS ABAIXO EXIGEM LOGIN (checkAuth) ====
+$auth = check_auth($pdo);
+if (!$auth && !in_array($action, ['validate', 'testmode_status', 'get_apk_update', 'set_apk_update', 'telegram_webhook'])) {
+    json_response(['error' => 'Acesso negado'], 401);
+}
+
+if ($auth) {
+    $ME = $auth['user'];
+    $IS_ADMIN = $auth['role'] === 'admin';
+    $resellers = $auth['resellers'];
+}
+
+// 2. LISTAR CÓDIGOS
+if ($action === 'list') {
+    if ($IS_ADMIN) {
+        $stmt = $pdo->query("SELECT code, exp, act, blocked, name, screenLimit, creator, COALESCE(created_at, exp) as created_at FROM codes");
+    } else {
+        $stmt = $pdo->prepare("SELECT code, exp, act, blocked, name, screenLimit, creator, COALESCE(created_at, exp) as created_at FROM codes WHERE creator = ?");
+        $stmt->execute([$ME]);
+    }
+    
+    $codes = [];
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $codes[] = [
+            'code' => $row['code'],
+            'exp' => (int)$row['exp'],
+            'created' => (int)$row['created_at'],
+            'blocked' => (bool)$row['blocked'],
+            'name' => $row['name'],
+            'screens' => max(1, (int)$row['screenLimit']),
+            'creator' => $row['creator'] ?: 'admin'
+        ];
+    }
+    json_response(['codes' => $codes]);
+}
+
+// 3. OBTER CRÉDITOS DO LOGADO
+if ($action === 'get_credits') {
+    json_response(['success' => true, 'credits' => $auth['data']['credits'] ?? 0]);
+}
+
+// 4. LISTAR REVENDEDORES (Para o Dashboard não travar)
+if ($action === 'get_resellers') {
+    $filtered = [];
+    foreach ($resellers as $k => $data) {
+        if ($k === 'admin') continue;
+        if ($IS_ADMIN || ($data['parent'] ?? null) === $ME) {
+            $filtered[$k] = $data;
+        }
+    }
+    json_response($filtered);
+}
+
+// 5. CRIAR CÓDIGO DE ACESSO
+if ($action === 'add' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $code = trim($body['code'] ?? '');
+    $hours = (float)($body['hours'] ?? 0);
+    $name = trim($body['name'] ?? '');
+    $screens = max(1, (int)($body['screens'] ?? 1));
+
+    if (!$code) json_response(['error' => 'Codigo vazio'], 400);
+    if ($hours <= 0) json_response(['error' => 'Validade invalida'], 400);
+
+    if (!$IS_ADMIN) {
+        if (is_reseller_or_parent_expired($pdo, $ME, $resellers)) {
+            json_response(['error' => 'Seu painel esta vencido. Renove para criar acessos.'], 403);
+        }
+        $baseCost = $hours <= 12 ? 0 : ceil($hours / 720);
+        $extraScreensCost = max(0, $screens - 2);
+        $cost = $baseCost + ($extraScreensCost * ($baseCost === 0 ? 1 : $baseCost));
+
+        $isUnlimited = ($resellers[$ME]['credits'] ?? 0) >= 9999;
+        if (!$isUnlimited) {
+            if (($resellers[$ME]['credits'] ?? 0) < $cost) {
+                json_response(['error' => "Creditos insuficientes. Custo: $cost credito(s)."], 400);
+            }
+            $resellers[$ME]['credits'] -= $cost;
+        }
+        save_all_resellers($pdo, $resellers);
+    }
+
+    $exp = (time() * 1000) + round($hours * 3600000);
+    $nowMs = time() * 1000;
+    
+    $stmt = $pdo->prepare("INSERT INTO codes (code, exp, act, blocked, name, screenLimit, creator, created_at) VALUES (?, ?, 0, 0, ?, ?, ?, ?) ON CONFLICT(code) DO UPDATE SET exp = excluded.exp, act = 0, blocked = 0, name = excluded.name, screenLimit = excluded.screenLimit, creator = excluded.creator, created_at = COALESCE(codes.created_at, excluded.created_at)");
+    
+    $stmt->execute([$code, $exp, $name, $screens, $IS_ADMIN ? 'admin' : $ME, $nowMs]);
+    
+    json_response(['ok' => true, 'exp' => $exp]);
+}
+
+// 6. DELETAR CÓDIGO
+if ($action === 'del' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $code = trim($body['code'] ?? '');
+    $stmt = $pdo->prepare("SELECT creator FROM codes WHERE code = ?");
+    $stmt->execute([$code]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($row && !$IS_ADMIN && $row['creator'] !== $ME) json_response(['error' => 'Sem permissao para este codigo'], 403);
+    
+    $pdo->prepare("DELETE FROM codes WHERE code = ?")->execute([$code]);
+    $pdo->prepare("DELETE FROM sessions WHERE code = ?")->execute([$code]);
+    json_response(['ok' => true]);
+}
+
+// 7. BLOQUEAR / DESBLOQUEAR CÓDIGO
+if (($action === 'block' || $action === 'unblock') && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $code = trim($body['code'] ?? '');
+    $stmt = $pdo->prepare("SELECT creator FROM codes WHERE code = ?");
+    $stmt->execute([$code]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) json_response(['error' => 'Codigo nao encontrado'], 404);
+    if (!$IS_ADMIN && $row['creator'] !== $ME) json_response(['error' => 'Sem permissao para este codigo'], 403);
+    
+    $newBlocked = ($action === 'block') ? 1 : 0;
+    $pdo->prepare("UPDATE codes SET blocked = ? WHERE code = ?")->execute([$newBlocked, $code]);
+    json_response(['ok' => true, 'blocked' => (bool)$newBlocked]);
+}
+
+// 8. ALTERAR DIAS DO CÓDIGO (Gerenciando saldo de crédito)
+if ($action === 'setdays' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $code = trim($body['code'] ?? '');
+    $days = (int)($body['days'] ?? 0);
+    if ($days <= 0) json_response(['error' => 'Quantidade de dias invalida'], 400);
+    
+    $stmt = $pdo->prepare("SELECT exp, screenLimit, creator FROM codes WHERE code = ?");
+    $stmt->execute([$code]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) json_response(['error' => 'Codigo nao encontrado'], 404);
+    if (!$IS_ADMIN && $row['creator'] !== $ME) json_response(['error' => 'Sem permissao'], 403);
+
+    if (!$IS_ADMIN) {
+        if (is_reseller_or_parent_expired($pdo, $ME, $resellers)) json_response(['error' => 'Seu painel esta vencido.'], 403);
+        $currentDays = 0; $nowMs = time() * 1000;
+        if ($row['exp'] > $nowMs) $currentDays = ceil(($row['exp'] - $nowMs) / 86400000);
+        
+        $diff = $days - $currentDays;
+        $baseCost = 0;
+        if ($diff > 0) $baseCost = ceil($diff / 30);
+        else if ($diff < 0) $baseCost = -floor(abs($diff) / 30);
+
+        $extraScreens = max(0, $row['screenLimit'] - 2);
+        $cost = $baseCost + ($extraScreens * $baseCost);
+
+        $isUnlimited = ($resellers[$ME]['credits'] ?? 0) >= 9999;
+        if (!$isUnlimited) {
+            if ($cost > 0 && ($resellers[$ME]['credits'] ?? 0) < $cost) json_response(['error' => 'Creditos insuficientes na sua conta.'], 400);
+            $resellers[$ME]['credits'] -= $cost;
+            save_all_resellers($pdo, $resellers);
+        }
+    }
+    $newExp = (time() * 1000) + ($days * 86400000);
+    $pdo->prepare("UPDATE codes SET exp = ? WHERE code = ?")->execute([$newExp, $code]);
+    json_response(['ok' => true, 'exp' => $newExp]);
+}
+
+// 9. ALTERAR LIMITE DE TELAS
+if ($action === 'setlimit' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $code = trim($body['code'] ?? '');
+    $screens = max(1, (int)($body['screens'] ?? 1));
+    
+    $stmt = $pdo->prepare("SELECT exp, screenLimit, creator FROM codes WHERE code = ?");
+    $stmt->execute([$code]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) json_response(['error' => 'Codigo nao encontrado'], 404);
+    if (!$IS_ADMIN && $row['creator'] !== $ME) json_response(['error' => 'Sem permissao'], 403);
+
+    if (!$IS_ADMIN) {
+        if (is_reseller_or_parent_expired($pdo, $ME, $resellers)) json_response(['error' => 'Seu painel esta vencido.'], 403);
+        $oldScreens = $row['screenLimit'];
+        $extraScreensToPay = 0;
+        if ($screens > 2 && $screens > $oldScreens) {
+           $alreadyPaidExtras = max(0, $oldScreens - 2);
+           $newExtras = $screens - 2;
+           $extraScreensToPay = $newExtras - $alreadyPaidExtras;
+        }
+        if ($extraScreensToPay > 0) {
+           $remainingDays = 0; $nowMs = time() * 1000;
+           if ($row['exp'] > $nowMs) $remainingDays = ceil(($row['exp'] - $nowMs) / 86400000);
+           $baseCost = $remainingDays <= 0 ? 1 : ceil($remainingDays / 30);
+           $cost = $extraScreensToPay * $baseCost;
+           
+           $isUnlimited = ($resellers[$ME]['credits'] ?? 0) >= 9999;
+           if (!$isUnlimited) {
+             if (($resellers[$ME]['credits'] ?? 0) < $cost) json_response(['error' => "Creditos insuficientes para adicionar telas. Custo: $cost"], 400);
+             $resellers[$ME]['credits'] -= $cost;
+             save_all_resellers($pdo, $resellers);
+           }
+        }
+    }
+    $pdo->prepare("UPDATE codes SET screenLimit = ? WHERE code = ?")->execute([$screens, $code]);
+    json_response(['ok' => true, 'screenLimit' => $screens]);
+}
+
+// 10. CRIAR CONVITE DE REVENDA
+if ($action === 'create_reseller_invite' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $days = (float)($body['days'] ?? 0);
+    $credits = (int)($body['credits'] ?? 0);
+    $name = trim($body['name'] ?? '');
+
+    $costDays = $days >= 1 ? ceil($days / 30) : 0;
+    $isUnlimited = $IS_ADMIN || (($resellers[$ME]['credits'] ?? 0) >= 9999);
+    
+    if ($days == 0 && !$isUnlimited) json_response(['success' => false, 'error' => 'Apenas ilimitados podem criar painel vitalício.'], 403);
+
+    if (!$IS_ADMIN && !$isUnlimited) {
+        if (is_reseller_or_parent_expired($pdo, $ME, $resellers)) json_response(['success' => false, 'error' => 'Seu painel esta vencido.'], 403);
+        $totalCost = $credits + $costDays;
+        if (($resellers[$ME]['credits'] ?? 0) < $totalCost) json_response(['success' => false, 'error' => "Créditos insuficientes. Custo: $totalCost."], 400);
+        $resellers[$ME]['credits'] -= $totalCost;
+    }
+
+    $baseUser = $name ? preg_replace('/[^a-z0-9]/i', '', strtolower(iconv('UTF-8', 'ASCII//TRANSLIT', $name))) : 'pendente';
+    if (!$baseUser) $baseUser = 'pendente';
+    
+    $finalUser = $baseUser;
+    $counter = 1;
+    while (isset($resellers[$finalUser])) { $finalUser = $baseUser . $counter; $counter++; }
+
+    $appId = strtoupper(substr(md5(uniqid()), 0, 8));
+    $expiresAt = $days > 0 ? (time() * 1000) + ($days * 86400000) : null;
+    $token = substr(md5(uniqid()), 0, 10) . base_convert(time(), 10, 36);
+
+    $resellers[$finalUser] = [
+        'password' => substr(md5(uniqid()), 0, 8), 'role' => 'reseller', 'credits' => $credits,
+        'parent' => $ME, 'app_id' => $appId, 'created_at' => time() * 1000,
+        'expires_at' => $expiresAt, 'label' => $name ?: 'Pendente (Aguardando Login)', 'pending_invite' => $token,
+    ];
+    save_all_resellers($pdo, $resellers);
+    put_kv($pdo, "invite_$token", json_encode(['creator' => $ME, 'username' => $finalUser, 'used' => false]));
+    json_response(['success' => true, 'token' => $token]);
+}
+
+// 11. GERENCIAR CRÉDITOS E DIAS DA REVENDA
+if ($action === 'set_credits' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $target = trim($body['target'] ?? '');
+    $value = (int)($body['value'] ?? 0);
+    
+    if (!$target || $value < 0) json_response(['success' => false, 'error' => 'Dados invalidos'], 400);
+    if (!isset($resellers[$target])) json_response(['success' => false, 'error' => 'Revendedor nao encontrado'], 404);
+    if (($resellers[$target]['parent'] ?? null) !== $ME && !$IS_ADMIN) json_response(['success' => false, 'error' => 'Nao autorizado'], 403);
+
+    $oldValue = $resellers[$target]['credits'] ?? 0;
+    $diff = $value - $oldValue;
+
+    if (!$IS_ADMIN) {
+        $isUnlimited = ($resellers[$ME]['credits'] ?? 0) >= 9999;
+        if (is_reseller_or_parent_expired($pdo, $ME, $resellers)) json_response(['success' => false, 'error' => 'Painel vencido.'], 403);
+        if (!$isUnlimited) {
+            if ($diff > 0 && ($resellers[$ME]['credits'] ?? 0) < $diff) json_response(['success' => false, 'error' => 'Creditos insuficientes'], 400);
+            $resellers[$ME]['credits'] -= $diff;
+        }
+    }
+    $resellers[$target]['credits'] = $value;
+    save_all_resellers($pdo, $resellers);
+    json_response(['success' => true]);
+}
+
+if ($action === 'add_reseller_days' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $target = trim($body['target'] ?? '');
+    $addDays = (float)($body['days'] ?? 0);
+    
+    if (!$target || $addDays < 0) json_response(['success' => false, 'error' => 'Dados invalidos'], 400);
+    if (!isset($resellers[$target])) json_response(['success' => false, 'error' => 'Nao encontrado'], 404);
+    if (($resellers[$target]['parent'] ?? null) !== $ME && !$IS_ADMIN) json_response(['success' => false, 'error' => 'Nao autorizado'], 403);
+
+    $isUnlimited = $IS_ADMIN || (($resellers[$ME]['credits'] ?? 0) >= 9999);
+    if ($addDays == 0 && !$isUnlimited) json_response(['success' => false, 'error' => 'Apenas ilimitados podem definir como vitalício.'], 403);
+
+    if (!$IS_ADMIN && !$isUnlimited) {
+        $costDays = $addDays >= 1 ? ceil($addDays / 30) : 0;
+        if (($resellers[$ME]['credits'] ?? 0) < $costDays) json_response(['success' => false, 'error' => "Créditos insuficientes"], 400);
+        $resellers[$ME]['credits'] -= $costDays;
+    }
+
+    if ($addDays == 0) { $resellers[$target]['expires_at'] = null; } 
+    else {
+        $currentExp = $resellers[$target]['expires_at'] ?? (time() * 1000);
+        if ($currentExp < (time() * 1000)) $currentExp = (time() * 1000);
+        $resellers[$target]['expires_at'] = $currentExp + ($addDays * 86400000);
+    }
+    save_all_resellers($pdo, $resellers);
+    json_response(['success' => true]);
+}
+
+if (($action === 'block_reseller' || $action === 'unblock_reseller') && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $target = trim($body['target'] ?? '');
+    if (isset($resellers[$target]) && (($resellers[$target]['parent'] ?? null) === $ME || $IS_ADMIN)) {
+        $resellers[$target]['blocked'] = ($action === 'block_reseller');
+        save_all_resellers($pdo, $resellers);
+        json_response(['success' => true]);
+    }
+    json_response(['success' => false, 'error' => 'Nao autorizado'], 403);
+}
+
+// 12. MODO TESTE
+if ($action === 'set_testmode' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $target = trim($body['target'] ?? '');
+    $minutes = (int)($body['minutes'] ?? 0);
+    $who = $target ?: $ME;
+    
+    if (!isset($resellers[$who])) json_response(['success' => false, 'error' => 'Nao encontrado'], 404);
+    if ($who !== $ME && !$IS_ADMIN && ($resellers[$who]['parent'] ?? null) !== $ME) json_response(['success' => false, 'error' => 'Nao autorizado'], 403);
+    
+    if ($minutes > 0) {
+        $resellers[$who]['test_mode'] = [
+            'minutes' => $minutes,
+            'until' => (time() * 1000) + ($minutes * 60000),
+            'app_id' => $resellers[$who]['app_id'] ?? ''
+        ];
+    } else {
+        unset($resellers[$who]['test_mode']);
+    }
+    save_reseller($pdo, $who, $resellers[$who]);
+    json_response(['success' => true]);
+}
+
+if ($action === 'get_testmode') {
+    $targetParam = trim($_GET['target'] ?? '');
+    $who = $targetParam ?: $ME;
+    if (!isset($resellers[$who])) $who = $ME;
+    $t = $resellers[$who]['test_mode'] ?? null;
+    $now = time() * 1000;
+    $remaining = ($t && isset($t['until']) && $t['until'] > $now) ? ceil(($t['until'] - $now) / 60000) : 0;
+    json_response([ 'app_id' => $resellers[$who]['app_id'] ?? '', 'minutes' => $remaining > 0 && $t ? $t['minutes'] : 0, 'on' => $remaining > 0 ]);
+}
+
+// 13. CONFIGURAÇÕES VISUAIS E DE AUTO-TESTE
+if ($action === 'get_appearance_settings') {
+    $myData = $resellers[$ME] ?? [];
+    json_response(['banner' => $myData['dashboard_banner'] ?? '', 'background' => $myData['dashboard_background'] ?? '']);
+}
+
+if ($action === 'set_appearance_settings' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $resellers[$ME]['dashboard_banner'] = trim($body['banner'] ?? '');
+    $resellers[$ME]['dashboard_background'] = trim($body['background'] ?? '');
+    save_reseller($pdo, $ME, $resellers[$ME]);
+    json_response(['success' => true]);
+}
+
+if ($action === 'get_expiration_settings') {
+    $myData = $resellers[$ME] ?? [];
+    json_response([
+        'msg' => $myData['expiration_msg'] ?? '', 'banner' => $myData['expiration_banner'] ?? '',
+        'btn_text' => $myData['expiration_btn_text'] ?? '', 'btn_url' => $myData['expiration_btn_url'] ?? ''
+    ]);
+}
+
+if ($action === 'set_expiration_settings' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $resellers[$ME]['expiration_msg'] = trim($body['msg'] ?? '');
+    $resellers[$ME]['expiration_banner'] = trim($body['banner'] ?? '');
+    $resellers[$ME]['expiration_btn_text'] = trim($body['btn_text'] ?? '');
+    $resellers[$ME]['expiration_btn_url'] = trim($body['btn_url'] ?? '');
+    save_reseller($pdo, $ME, $resellers[$ME]);
+    json_response(['success' => true]);
+}
+
+if ($action === 'get_autotest') {
+    $autoRaw = get_kv($pdo, 'autotest_config');
+    $autoCfg = $autoRaw ? json_decode($autoRaw, true) : null;
+    $on = ($autoCfg && ($autoCfg['minutes'] ?? 0) > 0 && ($autoCfg['until'] ?? 0) > (time() * 1000));
+    json_response(['on' => $on, 'minutes' => $on ? $autoCfg['minutes'] : 0]);
+}
+
+if ($action === 'set_autotest' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!$IS_ADMIN) json_response(['success' => false, 'error' => 'Nao autorizado'], 403);
+    $minutes = (int)($body['minutes'] ?? 0);
+    if ($minutes > 0) {
+        put_kv($pdo, 'autotest_config', json_encode(['minutes' => $minutes, 'until' => (time() * 1000) + ($minutes * 60000)]));
+    } else {
+        $pdo->prepare("DELETE FROM kv WHERE key = 'autotest_config'")->execute();
+    }
+    json_response(['success' => true]);
+}
+
+// 14. SISTEMA DE BACKUP TELEGRAM
+if ($action === 'get_telegram_backup') {
+    $stmt = $pdo->prepare("SELECT * FROM revenda_backup WHERE revenda_user = ?");
+    $stmt->execute([$ME]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($row) {
+        json_response([
+            'success' => true,
+            'configured' => true,
+            'chat_id' => $row['telegram_chat_id'],
+            'backup_ativo' => (bool)$row['backup_ativo'],
+            'intervalo_backup' => (int)$row['intervalo_backup'],
+            'id_ativacao' => $row['id_ativacao'],
+            'ultimo_backup' => $row['ultimo_backup']
+        ]);
+    } else {
+        json_response(['success' => true, 'configured' => false]);
+    }
+}
+
+if ($action === 'set_telegram_backup' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $botToken = trim($body['bot_token'] ?? '');
+    $ativo = (int)($body['ativo'] ?? 0);
+    $intervalo = (int)($body['intervalo'] ?? 86400000);
+    
+    $stmt = $pdo->prepare("SELECT id_ativacao, telegram_chat_id FROM revenda_backup WHERE revenda_user = ?");
+    $stmt->execute([$ME]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    $idAtivacao = $row ? $row['id_ativacao'] : "PLB-" . strtoupper(substr(md5(uniqid()), 0, 6));
+    $chatId = $row ? $row['telegram_chat_id'] : "";
+    
+    $stmt = $pdo->prepare("INSERT INTO revenda_backup (revenda_user, id_ativacao, telegram_chat_id, telegram_bot_token, backup_ativo, intervalo_backup, criado_em) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(revenda_user) DO UPDATE SET backup_ativo = excluded.backup_ativo, intervalo_backup = excluded.intervalo_backup, telegram_bot_token = excluded.telegram_bot_token");
+    $stmt->execute([$ME, $idAtivacao, $chatId, $botToken, $ativo, $intervalo, time() * 1000]);
+    
+    json_response(['success' => true, 'id_ativacao' => $idAtivacao, 'ja_conectado' => !empty($chatId)]);
+}
+
+if ($action === 'restore_backup' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_FILES['backup_file']) || $_FILES['backup_file']['error'] !== UPLOAD_ERR_OK) {
+        json_response(['error' => 'Erro ao receber o arquivo no servidor.'], 400);
+    }
+
+    $input = file_get_contents($_FILES['backup_file']['tmp_name']);
+    
+    if (strlen($input) < 32 || substr($input, 0, 4) !== 'PLB1') {
+        json_response(['error' => 'O arquivo nao possui o formato valido de backup.'], 400);
+    }
+    
+    $iv = substr($input, 4, 12);
+    $tag = substr($input, -16);
+    $cipher = substr($input, 16, -16);
+    
+    $key1 = hash('sha256', 'BackupPoupalauncher2026', true);
+    $decrypted = openssl_decrypt($cipher, 'aes-256-gcm', $key1, OPENSSL_RAW_DATA, $iv, $tag);
+    
+    if ($decrypted === false) {
+        $key2 = hash('sha256', '17out1986', true);
+        $decrypted = openssl_decrypt($cipher, 'aes-256-gcm', $key2, OPENSSL_RAW_DATA, $iv, $tag);
+    }
+    
+    if ($decrypted === false) {
+        json_response(['error' => 'A senha interna de descriptografia nao confere.'], 400);
+    }
+    
+    // Extração agressiva: Pega estritamente do primeiro "{" ou "[" até o último "}" ou "]"
+    $startObj = strpos($decrypted, '{');
+    $startArr = strpos($decrypted, '[');
+    $start = false;
+    if ($startObj !== false && $startArr !== false) $start = min($startObj, $startArr);
+    else if ($startObj !== false) $start = $startObj;
+    else if ($startArr !== false) $start = $startArr;
+
+    $endObj = strrpos($decrypted, '}');
+    $endArr = strrpos($decrypted, ']');
+    $end = false;
+    if ($endObj !== false && $endArr !== false) $end = max($endObj, $endArr);
+    else if ($endObj !== false) $end = $endObj;
+    else if ($endArr !== false) $end = $endArr;
+
+    if ($start !== false && $end !== false && $end >= $start) {
+        $decrypted = substr($decrypted, $start, $end - $start + 1);
+    }
+
+    $data = json_decode($decrypted, true);
+    
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        json_response(['error' => 'Erro ao converter JSON interno: ' . json_last_error_msg()], 400);
+    }
+    
+    $myAppId = strtoupper($auth['data']['app_id'] ?? ($ME === 'admin' ? 'ADMIN' : ''));
+    $backupAppId = strtoupper(trim($data['app_id'] ?? ''));
+
+    if ($backupAppId && $myAppId && $backupAppId !== $myAppId && !$IS_ADMIN) {
+        json_response(['error' => 'Este backup pertence a outro App ID (' . $backupAppId . ').'], 403);
+    }
+
+    if (isset($data['revenda']) && $data['revenda'] !== $ME && !$IS_ADMIN) {
+        $isDescendant = false;
+        $cur = $data['revenda'];
+        while ($cur && isset($resellers[$cur])) {
+            if (($resellers[$cur]['parent'] ?? '') === $ME) { $isDescendant = true; break; }
+            $cur = $resellers[$cur]['parent'] ?? null;
+        }
+        if (!$isDescendant) {
+            json_response(['error' => 'Este backup pertence a outro usuario (' . $data['revenda'] . ').'], 403);
+        }
+    }
+
+    $restoredResellersCount = 0;
+    if (isset($data['revendedores']) && is_array($data['revendedores'])) {
+        $resChanged = false;
+        foreach ($data['revendedores'] as $k => $resData) {
+            if (!isset($resellers[$k])) {
+                $resellers[$k] = $resData;
+                $restoredResellersCount++;
+                $resChanged = true;
+            }
+        }
+        if ($resChanged) save_all_resellers($pdo, $resellers);
+    }
+
+    $codesList = [];
+    if (isset($data['codigos']) && is_array($data['codigos'])) {
+        $codesList = $data['codigos'];
+    } elseif (isset($data['codes']) && is_array($data['codes'])) {
+        $codesList = $data['codes'];
+    } elseif (is_array($data) && isset($data[0]) && is_array($data[0])) {
+        $codesList = $data;
+    } else {
+        json_response(['error' => 'O arquivo nao contem a lista de codigos esperada.'], 400);
+    }
+    
+    $added = 0;
+    $stmt = $pdo->prepare("INSERT OR IGNORE INTO codes (code, exp, act, blocked, name, screenLimit, creator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    
+    foreach ($codesList as $c) {
+        if (empty($c['code'])) continue;
+        $code = $c['code'];
+        $exp = $c['exp'] ?? 0;
+        $act = $c['act'] ?? 0;
+        $blocked = !empty($c['blocked']) ? 1 : 0;
+        $name = $c['name'] ?? '';
+        $screens = $c['screens'] ?? $c['screenLimit'] ?? 1;
+        $creator = $c['creator'] ?? $ME;
+        $created_at = $c['created'] ?? $c['created_at'] ?? (time() * 1000);
+        
+        $stmt->execute([$code, $exp, $act, $blocked, $name, $screens, $creator, $created_at]);
+        if ($stmt->rowCount() > 0) $added++;
+    }
+    json_response(['success' => true, 'restored' => $added, 'restored_resellers' => $restoredResellersCount]);
+}
+
+if ($action === 'telegram_webhook') {
+    $input = file_get_contents('php://input');
+    $update = json_decode($input, true);
+    
+    if (isset($update['message']['text']) && strpos($update['message']['text'], '/start PLB-') === 0) {
+        $parts = explode(' ', $update['message']['text']);
+        if (count($parts) === 2) {
+            $idAtivacao = trim($parts[1]);
+            $chatId = $update['message']['chat']['id'];
+            
+            $stmt = $pdo->prepare("SELECT revenda_user, telegram_bot_token FROM revenda_backup WHERE id_ativacao = ?");
+            $stmt->execute([$idAtivacao]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($row) {
+                $pdo->prepare("UPDATE revenda_backup SET telegram_chat_id = ? WHERE id_ativacao = ?")->execute([$chatId, $idAtivacao]);
+                
+                // IMPORTANTE: Insira o Token do Bot Oficial de backup aqui embaixo como Fallback
+                $botToken = !empty($row['telegram_bot_token']) ? $row['telegram_bot_token'] : 'COLOQUE_SEU_TOKEN_DE_BOT_DO_TELEGRAM_AQUI'; 
+                
+                $url = "https://api.telegram.org/bot$botToken/sendMessage";
+                $ch = curl_init($url);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                curl_setopt($ch, CURLOPT_POST, true);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
+                    'chat_id' => $chatId,
+                    'text' => "✅ Conta vinculada com sucesso!\n\nSeu sistema de backup criptografado do PoupaLauncher está ativo neste chat. Você receberá o arquivo .plb na frequência configurada."
+                ]));
+                curl_setopt($ch, CURLOPT_HTTPHEADER, ["Content-Type: application/json"]);
+                curl_exec($ch);
+                curl_close($ch);
+            }
+        }
+    }
+    http_response_code(200); echo "OK"; exit;
+}
+
+// 15. SISTEMA DE REBRAND (GERAÇÃO DE APK VIA GITHUB ACTIONS)
+if ($action === 'get_rebrand_status') {
+    $r_id = trim($_GET['reseller_id'] ?? '');
+    $val = get_kv($pdo, "rebrand_status_$r_id");
+    json_response(['status' => $val ?: '']);
+}
+
+if ($action === 'set_rebrand_status') {
+    $r_id = trim($_GET['reseller_id'] ?? '');
+    put_kv($pdo, "rebrand_status_$r_id", $body['status'] ?? '');
+    json_response(['success' => true]);
+}
+
+if ($action === 'get_rebrand_link') {
+    $r_id = trim($_GET['reseller_id'] ?? '');
+    $val = get_kv($pdo, "rebrand_link_$r_id");
+    $arr = $val ? json_decode($val, true) : [];
+    json_response(['link' => $arr['link'] ?? '']);
+}
+
+if ($action === 'set_rebrand_link') {
+    $r_id = trim($_GET['reseller_id'] ?? '');
+    put_kv($pdo, "rebrand_link_$r_id", json_encode(['link' => $body['link'] ?? '']));
+    json_response(['success' => true]);
+}
+
+if ($action === 'check_existing_apk') {
+    $r_id = trim($_GET['reseller_id'] ?? '');
+    $hash = trim($_GET['hash'] ?? '');
+    $savedHash = get_kv($pdo, "rebrand_hash_$r_id");
+    if ($savedHash === $hash) {
+        $linkData = get_kv($pdo, "rebrand_link_$r_id");
+        $arr = $linkData ? json_decode($linkData, true) : [];
+        if (!empty($arr['link'])) {
+            json_response(['link' => $arr['link']]);
+        }
+    }
+    json_response(['link' => '']);
+}
+
+if ($action === 'trigger_rebrand') {
+    $r_id = trim($_GET['reseller_id'] ?? '');
+    $appName = $body['app_name'] ?? '';
+    $logo = $body['logo_b64'] ?? '';
+    $wallpaper = $body['wallpaper_b64'] ?? '';
+    
+    // Hash para cacheamento idêntico ao original
+    $hashString = $appName . "|" . $logo . "|1|" . $wallpaper;
+    $hash = hash('sha256', $hashString);
+    put_kv($pdo, "rebrand_hash_$r_id", $hash);
+
+    // ==== CREDENCIAIS DO GITHUB ACTIONS ====
+    // ATENÇÃO: Substitua os dados abaixo pelos seus reais.
+    $ghToken = "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"; 
+    $ghRepo = "panthervpn/PoupaLauncher";
+    
+    $url = "https://api.github.com/repos/$ghRepo/dispatches";
+    $payload = json_encode([
+        "event_type" => "build_apk",
+        "client_payload" => [
+            "app_name" => $appName,
+            "logo_b64" => $logo,
+            "wallpaper_b64" => $wallpaper,
+            "reseller_id" => $r_id
+        ]
+    ]);
+
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        "Accept: application/vnd.github.v3+json",
+        "Authorization: Bearer $ghToken",
+        "User-Agent: PoupaLauncher-PHP",
+        "Content-Type: application/json"
+    ]);
+    $result = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode >= 400) {
+        json_response(['success' => false, 'error' => "Erro no GitHub ($httpCode). Gere um novo Token (Classic) com permissão 'repo' e 'workflow' e atualize no api.php."], 400);
+    }
+    
+    json_response(['success' => true]);
+}
+
+// Rota fallback para não quebrar
+json_response(['error' => 'Endpoint nao encontrado'], 404);
