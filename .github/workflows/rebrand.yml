@@ -136,7 +136,15 @@ jobs:
             TAG="rebrand-$RESELLER_ID"
           fi
           cp app_final.apk "$FINAL_APK"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "APK $APP_TYPE $RESELLER_ID"
+          RELEASE_ID=$(gh api "repos/${GITHUB_USER}/${GITHUB_REPO}/releases/tags/${TAG}" --jq '.id' 2>/dev/null || true)
+          if [ -z "$RELEASE_ID" ]; then
+            gh release create "$TAG" --title "$TAG" --notes "APK $APP_TYPE $RESELLER_ID"
+          else
+            for ASSET_ID in $(gh api "repos/${GITHUB_USER}/${GITHUB_REPO}/releases/${RELEASE_ID}/assets" --jq ".[] | select(.name==\"${FINAL_APK}\") | .id" 2>/dev/null); do
+              gh api -X DELETE "repos/${GITHUB_USER}/${GITHUB_REPO}/releases/assets/${ASSET_ID}" >/dev/null 2>&1 || true
+            done
+            sleep 2
+          fi
           gh release upload "$TAG" "$FINAL_APK" --clobber
 
       - name: Reportar link ao Painel
