@@ -72,7 +72,7 @@ jobs:
           echo -n "$RESELLER_ID" > app_extraido/assets/assets/rid.txt
           echo -n "$RESELLER_ID" > app_extraido/assets/rid.txt
 
-                    if [ "$APP_TYPE" == "spotify" ] || [ "$APP_TYPE" == "youtube" ]; then
+          if [ "$APP_TYPE" == "spotify" ] || [ "$APP_TYPE" == "youtube" ]; then
             echo -n "$PANEL_URL" > app_extraido/assets/assets/panel_url.txt
             echo -n "$PANEL_URL" > app_extraido/assets/panel_url.txt
             echo "DEBUG: Modo $APP_TYPE - rid.txt ($RESELLER_ID) e panel_url.txt injetados"
