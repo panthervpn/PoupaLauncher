@@ -12,7 +12,7 @@ on:
         description: 'ID do Revendedor'
         required: true
       app_type:
-        description: 'Tipo do App (launcher ou spotify)'
+        description: 'Tipo do App (launcher, spotify ou youtube)'
         required: false
         default: 'launcher'
 
@@ -42,14 +42,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APP_TYPE: ${{ github.event.client_payload.app_type || github.event.inputs.app_type || 'launcher' }}
         run: |
-          if [ "$APP_TYPE" == "spotify" ]; then
+if [ "$APP_TYPE" == "spotify" ]; then
             gh release download spotify-base -p "*.apk" -D spotify_dl
             mv spotify_dl/*.apk spotify.apk
             apktool d -s spotify.apk -o app_extraido
+          elif [ "$APP_TYPE" == "youtube" ]; then
+            gh release download youtube-base -p "*.apk" -D youtube_dl
+            mv youtube_dl/*.apk youtube.apk
+            apktool d -s youtube.apk -o app_extraido
           else
             apktool d -s base.apk -o app_extraido
           fi
-
       - name: Baixar assets, renomear app, trocar logo e injetar rid
         env:
           PANEL_URL: ${{ github.event.client_payload.panel_url }}
@@ -69,8 +72,10 @@ jobs:
           echo -n "$RESELLER_ID" > app_extraido/assets/assets/rid.txt
           echo -n "$RESELLER_ID" > app_extraido/assets/rid.txt
 
-          if [ "$APP_TYPE" == "spotify" ]; then
-            echo "DEBUG: Modo Spotify - apenas rid.txt ($RESELLER_ID) injetado"
+                    if [ "$APP_TYPE" == "spotify" ] || [ "$APP_TYPE" == "youtube" ]; then
+            echo -n "$PANEL_URL" > app_extraido/assets/assets/panel_url.txt
+            echo -n "$PANEL_URL" > app_extraido/assets/panel_url.txt
+            echo "DEBUG: Modo $APP_TYPE - rid.txt ($RESELLER_ID) e panel_url.txt injetados"
           else
             ASSETS=$(curl -s -H "X-Auth-Token: $REBRAND_TOKEN" "$PANEL_URL?action=get_rebrand_assets&reseller_id=$RESELLER_ID")
             APP_NAME_REMOTE=$(echo "$ASSETS" | jq -r '.app_name // empty')
@@ -118,9 +123,12 @@ jobs:
           APP_TYPE: ${{ github.event.client_payload.app_type || github.event.inputs.app_type || 'launcher' }}
         run: |
           set -e
-          if [ "$APP_TYPE" == "spotify" ]; then
+if [ "$APP_TYPE" == "spotify" ]; then
             FINAL_APK="Spotify.apk"
             TAG="spotify-$RESELLER_ID"
+          elif [ "$APP_TYPE" == "youtube" ]; then
+            FINAL_APK="YouTube.apk"
+            TAG="youtube-$RESELLER_ID"
           else
             SAFE_NAME=$(echo "$APP_NAME_INPUT" | sed 's/[^A-Za-z0-9._-]\+/_/g')
             if [ -z "$SAFE_NAME" ]; then SAFE_NAME="app"; fi
