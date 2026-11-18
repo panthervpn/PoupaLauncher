@@ -45,11 +45,11 @@ jobs:
           if [ "$APP_TYPE" == "spotify" ]; then
             gh release download spotify-base -p "*.apk" -D spotify_dl
             mv spotify_dl/*.apk spotify.apk
-            apktool d -s spotify.apk -o app_extraido
+            apktool d -s -r spotify.apk -o app_extraido
           elif [ "$APP_TYPE" == "youtube" ]; then
             gh release download youtube-base -p "*.apk" -D youtube_dl
             mv youtube_dl/*.apk youtube.apk
-            apktool d -s youtube.apk -o app_extraido
+            apktool d -s -r youtube.apk -o app_extraido
           else
             apktool d -s base.apk -o app_extraido
           fi
