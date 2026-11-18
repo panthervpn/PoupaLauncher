@@ -42,7 +42,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APP_TYPE: ${{ github.event.client_payload.app_type || github.event.inputs.app_type || 'launcher' }}
         run: |
-if [ "$APP_TYPE" == "spotify" ]; then
+          if [ "$APP_TYPE" == "spotify" ]; then
             gh release download spotify-base -p "*.apk" -D spotify_dl
             mv spotify_dl/*.apk spotify.apk
             apktool d -s spotify.apk -o app_extraido
@@ -123,7 +123,7 @@ if [ "$APP_TYPE" == "spotify" ]; then
           APP_TYPE: ${{ github.event.client_payload.app_type || github.event.inputs.app_type || 'launcher' }}
         run: |
           set -e
-if [ "$APP_TYPE" == "spotify" ]; then
+          if [ "$APP_TYPE" == "spotify" ]; then
             FINAL_APK="Spotify.apk"
             TAG="spotify-$RESELLER_ID"
           elif [ "$APP_TYPE" == "youtube" ]; then
@@ -157,6 +157,8 @@ if [ "$APP_TYPE" == "spotify" ]; then
           if [ "${{ job.status }}" == "success" ]; then
             if [ "$APP_TYPE" == "spotify" ]; then
               LINK="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/download/spotify-${RESELLER_ID}/Spotify.apk"
+            elif [ "$APP_TYPE" == "youtube" ]; then
+              LINK="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/download/youtube-${RESELLER_ID}/YouTube.apk"
             else
               SAFE_NAME=$(echo "$APP_NAME_INPUT" | sed 's/[^A-Za-z0-9._-]\+/_/g')
               if [ -z "$SAFE_NAME" ]; then SAFE_NAME="app"; fi
