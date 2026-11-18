@@ -136,14 +136,14 @@ jobs:
             TAG="rebrand-$RESELLER_ID"
           fi
           cp app_final.apk "$FINAL_APK"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "APK $APP_TYPE $RESELLER_ID"
-          gh release delete-asset "$TAG" "$FINAL_APK" -y >/dev/null 2>&1 || true
-          ASSET_IDS=$(gh api "repos/${GITHUB_USER}/${GITHUB_REPO}/releases/tags/${TAG}" --jq ".assets[] | select(.name==\"${FINAL_APK}\") | .id" 2>/dev/null || true)
-          for AID in $ASSET_IDS; do
-            gh api -X DELETE "repos/${GITHUB_USER}/${GITHUB_REPO}/releases/assets/${AID}" >/dev/null 2>&1 || true
+          gh release delete "$TAG" -y --cleanup-tag || true
+          OLD_RELS=$(gh api --paginate "repos/${GITHUB_USER}/${GITHUB_REPO}/releases?per_page=100" --jq ".[] | select(.tag_name==\"${TAG}\") | .id" || true)
+          for RID in $OLD_RELS; do
+            gh api -X DELETE "repos/${GITHUB_USER}/${GITHUB_REPO}/releases/${RID}" || true
           done
+          gh api -X DELETE "repos/${GITHUB_USER}/${GITHUB_REPO}/git/refs/tags/${TAG}" || true
           sleep 2
-          gh release upload "$TAG" "$FINAL_APK" --clobber
+          gh release create "$TAG" "$FINAL_APK" --title "$TAG" --notes "APK $APP_TYPE $RESELLER_ID"
 
       - name: Reportar link ao Painel
         if: always()
